@@ -1,2 +1,8 @@
-StreetWatch Pro 3.1 — Fast Start + Camera Picker
+StreetWatch Pro 3.2 — Camera Start Hotfix
 Windows-only local AI traffic / people / animal monitor
+
+Fixes:
+- first camera start crash in v3.1
+- tries DirectShow, Media Foundation, and default Windows camera backends
+- starts local webcams at a faster 1280x720 mode
+- clearer camera-busy / wrong-camera guidance
