@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+yolo26n.pt
+data/streetwatch.db
+data/snapshots/*.jpg
+build/
+dist/
+*.spec
