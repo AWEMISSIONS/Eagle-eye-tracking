@@ -588,6 +588,11 @@ class StreetWatchEngine:
         self.infer_imgsz = 640
         self.model_loading = False
         self.model_error = ""
+        # Session objects must exist before start() calls _reset_session_state().
+        # v3.1 could fail here before the camera opened because these were first
+        # created inside _reset_session_state() after .clear() was already called.
+        self.best_crop_by_track: dict[int, tuple[float, np.ndarray]] = {}
+        self.camera_fail_count = 0
 
         self.source: Union[int, str] = 0
         self.confidence = 0.28
@@ -691,11 +696,11 @@ class StreetWatchEngine:
         self.auto_speed.reset()
         self.headlights.reset()
         self.last_headlight_alert = 0.0
-        self.best_crop_by_track.clear()
+        # Recreate per-session containers rather than clearing objects that may
+        # not exist yet during the first ever camera start.
+        self.best_crop_by_track = {}
         self.camera_fail_count = 0
         self.frame_count = 0
-        self.camera_fail_count = 0
-        self.best_crop_by_track: dict[int, tuple[float, np.ndarray]] = {}
         self.fps_ema = 0.0
         self.infer_ms_ema = 0.0
         self.last_loop_time = 0.0
@@ -743,18 +748,55 @@ class StreetWatchEngine:
             self.model_loading = False
 
     def _open_camera(self):
-        if isinstance(self.source, int):
-            cap = cv2.VideoCapture(self.source, cv2.CAP_DSHOW)
-            if not cap.isOpened():
+        """Open a camera quickly and robustly on Windows.
+
+        Different webcams behave better with different OpenCV backends. Try
+        DirectShow, Media Foundation, then OpenCV's default backend and only
+        accept a camera after it actually returns a frame.
+        """
+        if not isinstance(self.source, int):
+            return cv2.VideoCapture(self.source)
+
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        last_cap = None
+        for backend in backends:
+            cap = None
+            try:
+                cap = cv2.VideoCapture(self.source, backend)
+                last_cap = cap
+                if not cap.isOpened():
+                    cap.release()
+                    continue
+
+                # 1280x720 starts substantially faster on many USB webcams than
+                # forcing 1080p. A camera may still choose its nearest mode.
+                try:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                    cap.set(cv2.CAP_PROP_FPS, 30)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    return cap
                 cap.release()
-                cap = cv2.VideoCapture(self.source, cv2.CAP_MSMF)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        else:
-            cap = cv2.VideoCapture(self.source)
-        return cap
+            except Exception:
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+
+        # Return an unopened capture so the caller can show the normal,
+        # user-friendly "could not open camera" error.
+        try:
+            if last_cap is not None:
+                last_cap.release()
+        except Exception:
+            pass
+        return cv2.VideoCapture()
 
     def _active_class_ids(self) -> list[int]:
         ids: list[int] = []
@@ -772,7 +814,13 @@ class StreetWatchEngine:
             # immediate live picture instead of staring at a Loading message.
             self.cap = self._open_camera()
             if not self.cap.isOpened():
-                raise RuntimeError(f"Could not open camera/source: {self.source}")
+                raise RuntimeError(
+                    f"Could not start camera {self.source}. "
+                    "Click FIND CAMERAS and choose a camera that appears. "
+                    "If it still will not open, close Windows Camera, Zoom, Teams, "
+                    "or any other program that may already be using the webcam, "
+                    "then press START LIVE again."
+                )
             if self.model is None:
                 self.event_queue.put(("status", "CAMERA LIVE — AI loading in background..."))
                 self.prepare_ai_async()
